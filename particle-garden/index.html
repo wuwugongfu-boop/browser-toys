@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Particle Garden</title>
+<style>
+  :root { --panel: rgba(18,18,28,0.72); --accent: #8be9fd; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; background: #05050a; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  canvas { display: block; position: fixed; inset: 0; cursor: crosshair; }
+
+  #panel {
+    position: fixed; top: 16px; left: 16px; z-index: 10;
+    background: var(--panel); backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 16px;
+    padding: 16px 18px; width: 250px; color: #e6e6f0;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+    transition: transform .35s cubic-bezier(.4,1.3,.5,1), opacity .25s;
+  }
+  #panel.hidden { transform: translateX(-115%); opacity: 0; pointer-events: none; }
+  h1 { font-size: 15px; letter-spacing: .5px; font-weight: 600; margin-bottom: 2px;
+       background: linear-gradient(90deg,#8be9fd,#bd93f9,#ff79c6); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { font-size: 11px; color: #8a8aa0; margin-bottom: 14px; }
+  label { display: block; font-size: 11px; color: #b8b8cc; margin: 12px 0 4px; display: flex; justify-content: space-between; }
+  label span { color: var(--accent); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; height: 4px; -webkit-appearance: none; appearance: none;
+    background: rgba(255,255,255,0.12); border-radius: 4px; outline: none; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 15px; height: 15px; border-radius: 50%;
+    background: var(--accent); cursor: pointer; box-shadow: 0 0 10px var(--accent); }
+  .palettes { display: flex; gap: 7px; margin-top: 6px; flex-wrap: wrap; }
+  .pal { width: 30px; height: 22px; border-radius: 7px; cursor: pointer; border: 2px solid transparent; transition: transform .15s; }
+  .pal:hover { transform: scale(1.12); }
+  .pal.active { border-color: #fff; }
+  .row { display: flex; gap: 8px; margin-top: 16px; }
+  button { flex: 1; padding: 8px; font-size: 12px; font-weight: 600; color: #e6e6f0; cursor: pointer;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; transition: background .2s; }
+  button:hover { background: rgba(255,255,255,0.14); }
+  button.on { background: rgba(139,233,253,0.18); border-color: var(--accent); color: var(--accent); }
+  #hint { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 10;
+    color: #6a6a82; font-size: 12px; text-align: center; pointer-events: none; transition: opacity .5s; }
+  #toggle { position: fixed; top: 16px; left: 16px; z-index: 11; width: 38px; height: 38px; border-radius: 12px;
+    background: var(--panel); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.08);
+    color: #e6e6f0; font-size: 18px; cursor: pointer; display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="toggle">☰</button>
+
+<div id="panel">
+  <h1>✦ Particle Garden</h1>
+  <div class="sub">Click & drag to plant light</div>
+
+  <label>Gravity / Pull <span id="vGrav">0.6</span></label>
+  <input type="range" id="grav" min="-1" max="2" step="0.05" value="0.6">
+
+  <label>Particle Life <span id="vLife">100</span></label>
+  <input type="range" id="life" min="30" max="220" step="5" value="100">
+
+  <label>Burst Size <span id="vBurst">14</span></label>
+  <input type="range" id="burst" min="1" max="40" step="1" value="14">
+
+  <label>Trail Glow <span id="vTrail">0.08</span></label>
+  <input type="range" id="trail" min="0.02" max="0.4" step="0.01" value="0.08">
+
+  <label>Palette</label>
+  <div class="palettes" id="palettes"></div>
+
+  <div class="row">
+    <button id="swirlBtn" class="on">Swirl</button>
+    <button id="clearBtn">Clear</button>
+  </div>
+</div>
+
+<div id="hint">Move your mouse to attract · Click to burst · Drag to paint</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+resize();
+addEventListener('resize', resize);
+
+// ---- Palettes (each is a list of hues, in degrees) ----
+const PALETTES = [
+  { name: 'Aurora',  colors: ['#8be9fd','#bd93f9','#50fa7b','#ff79c6'] },
+  { name: 'Ember',   colors: ['#ff6b35','#f7c548','#ff3864','#ffd23f'] },
+  { name: 'Ocean',   colors: ['#00b4d8','#0077b6','#90e0ef','#48cae4'] },
+  { name: 'Candy',   colors: ['#ff8fab','#fb6f92','#ffb3c6','#ffc8dd'] },
+  { name: 'Mono',    colors: ['#ffffff','#cfd8ff','#a0a0c0','#e0e0ff'] },
+];
+let palette = PALETTES[0];
+
+// ---- Settings ----
+const S = { gravity: 0.6, life: 100, burst: 14, trail: 0.08, swirl: true };
+
+// ---- Particles ----
+const particles = [];
+let mouse = { x: W/2, y: H/2, active: false, down: false };
+
+function pick(arr){ return arr[(Math.random()*arr.length)|0]; }
+
+function spawn(x, y, n, force=1) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = (Math.random() * 2.5 + 0.5) * force;
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      life: S.life * (0.6 + Math.random() * 0.6),
+      maxLife: S.life,
+      size: Math.random() * 2.5 + 1.2,
+      color: pick(palette.colors),
+    });
+  }
+}
+
+function step() {
+  // fade trail
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = `rgba(5,5,10,${S.trail})`;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.globalCompositeOperation = 'lighter';
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+
+    if (mouse.active) {
+      const dx = mouse.x - p.x, dy = mouse.y - p.y;
+      const d2 = dx*dx + dy*dy + 120;
+      const f = S.gravity * 60 / d2;
+      p.vx += dx * f;
+      p.vy += dy * f;
+      if (S.swirl) { p.vx += -dy * f * 0.6; p.vy += dx * f * 0.6; }
+    }
+
+    p.vx *= 0.97; p.vy *= 0.97;
+    p.x += p.vx; p.y += p.vy;
+    p.life--;
+
+    if (p.life <= 0 || p.x < -50 || p.x > W+50 || p.y < -50 || p.y > H+50) {
+      particles.splice(i, 1); continue;
+    }
+
+    const t = p.life / p.maxLife;
+    const r = p.size * (0.4 + t);
+    ctx.beginPath();
+    const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 4);
+    g.addColorStop(0, p.color);
+    g.addColorStop(1, 'transparent');
+    ctx.fillStyle = g;
+    ctx.globalAlpha = t * 0.9;
+    ctx.arc(p.x, p.y, r * 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // continuous emission while dragging
+  if (mouse.down) spawn(mouse.x, mouse.y, 2, 1);
+
+  requestAnimationFrame(step);
+}
+step();
+
+// ---- Input ----
+canvas.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true; });
+canvas.addEventListener('mouseleave', () => mouse.active = false);
+canvas.addEventListener('mousedown', e => { mouse.down = true; spawn(e.clientX, e.clientY, S.burst, 2.2); });
+addEventListener('mouseup', () => mouse.down = false);
+
+// touch
+canvas.addEventListener('touchstart', e => { const t=e.touches[0]; mouse.x=t.clientX; mouse.y=t.clientY; mouse.active=true; mouse.down=true; spawn(t.clientX,t.clientY,S.burst,2.2); e.preventDefault(); }, {passive:false});
+canvas.addEventListener('touchmove', e => { const t=e.touches[0]; mouse.x=t.clientX; mouse.y=t.clientY; e.preventDefault(); }, {passive:false});
+addEventListener('touchend', () => { mouse.down=false; mouse.active=false; });
+
+// ---- Controls wiring ----
+const bind = (id, key, label, fmt=(v)=>v) => {
+  const el = document.getElementById(id), out = document.getElementById('v'+label);
+  el.addEventListener('input', () => { S[key] = parseFloat(el.value); out.textContent = fmt(el.value); });
+};
+bind('grav','gravity','Grav');
+bind('life','life','Life', v => Math.round(v));
+bind('burst','burst','Burst', v => Math.round(v));
+bind('trail','trail','Trail');
+
+// palettes UI
+const palWrap = document.getElementById('palettes');
+PALETTES.forEach((p, i) => {
+  const d = document.createElement('div');
+  d.className = 'pal' + (i === 0 ? ' active' : '');
+  d.style.background = `linear-gradient(135deg, ${p.colors.join(',')})`;
+  d.title = p.name;
+  d.onclick = () => {
+    palette = p;
+    document.querySelectorAll('.pal').forEach(x => x.classList.remove('active'));
+    d.classList.add('active');
+    document.documentElement.style.setProperty('--accent', p.colors[0]);
+  };
+  palWrap.appendChild(d);
+});
+
+document.getElementById('swirlBtn').onclick = function(){ S.swirl = !S.swirl; this.classList.toggle('on', S.swirl); };
+document.getElementById('clearBtn').onclick = () => { particles.length = 0; ctx.fillStyle = '#05050a'; ctx.fillRect(0,0,W,H); };
+
+// panel collapse (handy on small screens)
+const panel = document.getElementById('panel'), toggle = document.getElementById('toggle');
+function checkSize(){ toggle.style.display = innerWidth < 560 ? 'block' : 'none'; }
+checkSize(); addEventListener('resize', checkSize);
+toggle.onclick = () => panel.classList.toggle('hidden');
+
+// fade the hint after a bit
+setTimeout(() => document.getElementById('hint').style.opacity = '0', 6000);
+
+// a little welcome burst
+setTimeout(() => { spawn(W/2, H/2, 60, 3); }, 300);
+</script>
+</body>
+</html>
